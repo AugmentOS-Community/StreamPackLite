@@ -101,6 +101,7 @@ class VideoMediaCodecEncoder(
 
     override fun extendMediaFormat(config: Config, format: MediaFormat) {
         val videoConfig = config as VideoConfig
+        codecSurface?.captureResolution = videoConfig.captureResolution
         orientationProvider?.let {
             it.getOrientedSize(videoConfig.resolution).apply {
                 // Override previous format
@@ -154,6 +155,12 @@ class VideoMediaCodecEncoder(
          */
         var useHighBitDepth = false
 
+        /**
+         * When non-null, [SurfaceTexture.setDefaultBufferSize] uses this size and
+         * [FullFrameRect] center-crops to the encoder viewport.
+         */
+        var captureResolution: Size? = null
+
         var outputSurface: Surface? = null
             set(value) {
                 /**
@@ -182,20 +189,24 @@ class VideoMediaCodecEncoder(
             eglSurface = ensureGlContext(EglWindowSurface(surface, useHighBitDepth)) {
                 val width = it.getWidth()
                 val height = it.getHeight()
-                val size =
+                val encoderSize =
                     orientationProvider?.getOrientedSize(Size(width, height)) ?: Size(width, height)
+                val captureOriented = captureResolution?.let { cr ->
+                    orientationProvider?.getOrientedSize(cr) ?: cr
+                }
+                val defaultBufferSize = captureOriented
+                    ?: (orientationProvider?.getDefaultBufferSize(encoderSize) ?: Size(width, height))
                 val orientation = orientationProvider?.orientation ?: 0
                 fullFrameRect = FullFrameRect(Texture2DProgram()).apply {
                     textureId = createTextureObject()
-                    setMVPMatrixAndViewPort(
+                    setMVPMatrixViewPortAndCrop(
                         orientation.toFloat(),
-                        size,
+                        encoderSize,
+                        captureOriented ?: encoderSize,
                         orientationProvider?.mirroredVertically ?: false
                     )
                 }
 
-                val defaultBufferSize =
-                    orientationProvider?.getDefaultBufferSize(size) ?: Size(width, height)
                 surfaceTexture = attachOrBuildSurfaceTexture(surfaceTexture).apply {
                     setDefaultBufferSize(defaultBufferSize.width, defaultBufferSize.height)
                     setOnFrameAvailableListener(this@CodecSurface)
@@ -234,12 +245,16 @@ class VideoMediaCodecEncoder(
                         val width = it.getWidth()
                         val height = it.getHeight()
 
-                        fullFrameRect?.setMVPMatrixAndViewPort(
+                        val encoderSize =
+                            orientationProvider?.getOrientedSize(Size(width, height))
+                                ?: Size(width, height)
+                        val captureOriented = captureResolution?.let { cr ->
+                            orientationProvider?.getOrientedSize(cr) ?: cr
+                        }
+                        fullFrameRect?.setMVPMatrixViewPortAndCrop(
                             (orientationProvider?.orientation ?: 0).toFloat(),
-                            orientationProvider?.getOrientedSize(Size(width, height)) ?: Size(
-                                width,
-                                height
-                            ),
+                            encoderSize,
+                            captureOriented ?: encoderSize,
                             orientationProvider?.mirroredVertically ?: false
                         )
 
