@@ -46,10 +46,6 @@ class CameraController(
 
     private var captureSession: CameraCaptureSession? = null
     private var captureRequest: CaptureRequest.Builder? = null
-    
-    // Public accessor for capture request builder (for EIS configuration)
-    val captureRequestBuilder: CaptureRequest.Builder?
-        get() = captureRequest
 
     private val threadManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
         CameraExecutorManager()
@@ -264,26 +260,6 @@ class CameraController(
         captureRequest = createRequestSession(
             camera!!, captureSession!!, getClosestFpsRange(camera!!.id, fps), targets
         )
-        
-        // Apply EIS (Electronic Image Stabilization) after builder is created
-        android.util.Log.d(TAG, "================= enableEIS===========")
-        var PIXSMART_EISFEATURE_EISENABLE: CaptureRequest.Key<Int>? = null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            PIXSMART_EISFEATURE_EISENABLE = CaptureRequest.Key(
-                "com.pixsmart.eisfeature.eisEnable", Int::class.java)
-        }
-        
-        if (captureRequest != null) {
-            captureRequest!!.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_SPORTS)
-            if (PIXSMART_EISFEATURE_EISENABLE != null) {
-                captureRequest!!.set(PIXSMART_EISFEATURE_EISENABLE, 1)
-            }
-            android.util.Log.d(TAG, "📹 EIS enabled for streaming")
-            
-            // CRITICAL: Update the repeating session to apply the new settings
-            updateRepeatingSession()
-            android.util.Log.d(TAG, "📹 EIS settings applied to active session")
-        }
     }
 
     fun stopCamera() {
