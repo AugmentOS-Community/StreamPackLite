@@ -260,6 +260,26 @@ class CameraController(
         captureRequest = createRequestSession(
             camera!!, captureSession!!, getClosestFpsRange(camera!!.id, fps), targets
         )
+
+        if (enablePixsmartEisOnRequest) {
+            applyPixsmartEis()
+        }
+    }
+
+    private fun applyPixsmartEis() {
+        val builder = captureRequest ?: return
+        builder.set(
+            CaptureRequest.CONTROL_SCENE_MODE,
+            CaptureRequest.CONTROL_SCENE_MODE_SPORTS
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val pixsmartEisKey = CaptureRequest.Key(
+                "com.pixsmart.eisfeature.eisEnable", Int::class.java
+            )
+            builder.set(pixsmartEisKey, 1)
+        }
+        updateRepeatingSession()
+        Logger.i(TAG, "Applied Pixsmart EIS (SPORTS + vendor key) to capture request")
     }
 
     fun stopCamera() {
@@ -385,5 +405,16 @@ class CameraController(
 
     companion object {
         private const val TAG = "CameraController"
+
+        /**
+         * Opt-in Mentra Live hook: when set to true, [startRequestSession] applies
+         * [CaptureRequest.CONTROL_SCENE_MODE_SPORTS] and the Pixsmart vendor key
+         * `com.pixsmart.eisfeature.eisEnable=1` to the active capture request.
+         *
+         * Defaults to false to keep this fork generic. asg_client toggles it from
+         * StreamCommandHandler when starting/stopping a livestream.
+         */
+        @JvmField
+        var enablePixsmartEisOnRequest: Boolean = false
     }
 }
