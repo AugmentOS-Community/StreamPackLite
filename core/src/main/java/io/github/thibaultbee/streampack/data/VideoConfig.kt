@@ -39,6 +39,7 @@ import io.github.thibaultbee.streampack.internal.utils.extensions.landscapize
 import io.github.thibaultbee.streampack.internal.utils.extensions.portraitize
 import io.github.thibaultbee.streampack.streamers.bases.BaseStreamer
 import java.security.InvalidParameterException
+import kotlin.jvm.JvmOverloads
 import kotlin.math.roundToInt
 
 /**
@@ -47,7 +48,7 @@ import kotlin.math.roundToInt
  *
  * @see [BaseStreamer.configure]
  */
-class VideoConfig(
+class VideoConfig @JvmOverloads constructor(
     /**
      * Video encoder mime type.
      * Only [MediaFormat.MIMETYPE_VIDEO_AVC], [MediaFormat.MIMETYPE_VIDEO_HEVC],
@@ -89,7 +90,13 @@ class VideoConfig(
      * A value of 0 means that each frame is an I-frame.
      * On device with API < 25, this value will be rounded to an integer. So don't expect a precise value and any value < 0.5 will be considered as 0.
      */
-    val gopDuration: Float = 1f  // 1s between I frames
+    val gopDuration: Float = 1f,  // 1s between I frames
+    /**
+     * Optional camera / SurfaceTexture buffer size. When set (and larger than [resolution] in
+     * at least one dimension), frames are center-cropped in the GL path to [resolution] before
+     * encoding. Encoder [MediaFormat] always uses [resolution].
+     */
+    val captureResolution: Size? = null
 ) : Config(mimeType, startBitrate, profile) {
     init {
         require(mimeType.isVideo) { "MimeType must be video" }
@@ -126,7 +133,8 @@ class VideoConfig(
          * This is a best effort as few camera can not generate a fixed framerate.
          * For live streaming, I-frame interval should be really low. For recording, I-frame interval should be higher.
          */
-        gopDuration: Float = 1f  // 1s between I frames
+        gopDuration: Float = 1f,  // 1s between I frames
+        captureResolution: Size? = null
     ) : this(
         mimeType,
         startBitrate,
@@ -134,7 +142,8 @@ class VideoConfig(
         fps,
         profileLevel.profile,
         profileLevel.level,
-        gopDuration
+        gopDuration,
+        captureResolution
     )
 
     /**
@@ -277,6 +286,6 @@ class VideoConfig(
     }
 
     override fun toString() =
-        "VideoConfig(mimeType='$mimeType', startBitrate=$startBitrate, resolution=$resolution, fps=$fps, profile=$profile, level=$level)"
+        "VideoConfig(mimeType='$mimeType', startBitrate=$startBitrate, resolution=$resolution, captureResolution=$captureResolution, fps=$fps, profile=$profile, level=$level)"
 }
 

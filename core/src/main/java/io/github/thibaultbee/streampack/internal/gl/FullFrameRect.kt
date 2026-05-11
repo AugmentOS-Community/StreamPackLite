@@ -22,6 +22,10 @@ import android.util.Size
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 
 /**
@@ -32,6 +36,7 @@ import java.nio.FloatBuffer
  */
 class FullFrameRect(var program: Texture2DProgram) {
     private val mvpMatrix = FloatArray(16)
+    private var texCoordBuffer: FloatBuffer = duplicateTexCoords(FULL_RECTANGLE_TEX_COORDS)
 
     companion object {
         /**
@@ -63,10 +68,57 @@ class FullFrameRect(var program: Texture2DProgram) {
             // Allocate a direct ByteBuffer, using 4 bytes per float, and copy coords into it.
             val bb: ByteBuffer = ByteBuffer.allocateDirect(coords.size * Float.SIZE_BYTES)
             bb.order(ByteOrder.nativeOrder())
-            val fb: FloatBuffer = bb.asFloatBuffer()
+            val fb = bb.asFloatBuffer()
             fb.put(coords)
             fb.position(0)
             return fb
+        }
+
+        private fun duplicateTexCoords(coords: FloatArray): FloatBuffer {
+            val bb: ByteBuffer = ByteBuffer.allocateDirect(coords.size * Float.SIZE_BYTES)
+            bb.order(ByteOrder.nativeOrder())
+            val fb = bb.asFloatBuffer()
+            fb.put(coords)
+            fb.position(0)
+            return fb
+        }
+
+        /** Center-crop rectangle in pixel space (top-left origin) matching target aspect. */
+        private fun centerCropRect(
+            captureWidth: Int,
+            captureHeight: Int,
+            targetWidth: Int,
+            targetHeight: Int
+        ): FloatArray {
+            if (captureWidth <= 0 || captureHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+                return floatArrayOf(0f, 0f, 1f, 1f)
+            }
+            val sourceAspect = captureWidth / captureHeight.toFloat()
+            val targetAspect = targetWidth / targetHeight.toFloat()
+            var cropW = captureWidth
+            var cropH = captureHeight
+            if (abs(sourceAspect - targetAspect) > 0.0001f) {
+                if (sourceAspect > targetAspect) {
+                    cropW = (captureHeight * targetAspect).roundToInt()
+                } else {
+                    cropH = (captureWidth / targetAspect).roundToInt()
+                }
+            }
+            cropW = max(1, min(captureWidth, cropW))
+            cropH = max(1, min(captureHeight, cropH))
+            val cropX = max(0, (captureWidth - cropW) / 2)
+            val cropY = max(0, (captureHeight - cropH) / 2)
+            // GL texture coords with v=0 at bottom (SurfaceTexture / OES convention)
+            val u0 = cropX / captureWidth.toFloat()
+            val u1 = (cropX + cropW) / captureWidth.toFloat()
+            val v0 = (captureHeight - (cropY + cropH)) / captureHeight.toFloat()
+            val v1 = (captureHeight - cropY) / captureHeight.toFloat()
+            return floatArrayOf(
+                u0, v0,
+                u1, v0,
+                u0, v1,
+                u1, v1
+            )
         }
     }
 
@@ -104,13 +156,57 @@ class FullFrameRect(var program: Texture2DProgram) {
     }
 
     fun setMVPMatrixAndViewPort(rotation: Float, resolution: Size, mirroredVertically: Boolean) {
+        setMVPMatrixViewPortAndCrop(rotation, resolution, resolution, mirroredVertically)
+    }
+
+    /**
+     * Sets MVP + viewport to [viewport] size, and texture coordinates to center-crop [capture]
+     * to match the aspect ratio of [viewport] after accounting for [rotation] (swap width/height
+     * for 90° / 270° when comparing aspects, matching how the MVP rotates the drawn quad).
+     */
+    fun setMVPMatrixViewPortAndCrop(
+        rotation: Float,
+        viewport: Size,
+        capture: Size,
+        mirroredVertically: Boolean
+    ) {
         Matrix.setIdentityM(mvpMatrix, 0)
         Matrix.scaleM(mvpMatrix, 0, if (mirroredVertically) -1f else 1f, 1f, 0f)
         Matrix.rotateM(
             mvpMatrix, 0,
             rotation, 0f, 0f, -1f
         )
-        GLES20.glViewport(0, 0, resolution.width, resolution.height)
+        GLES20.glViewport(0, 0, viewport.width, viewport.height)
+
+        val rotNorm = ((rotation.toInt() % 360) + 360) % 360
+        val aspectW: Int
+        val aspectH: Int
+        when (rotNorm) {
+            90, 270 -> {
+                aspectW = viewport.height
+                aspectH = viewport.width
+            }
+            else -> {
+                aspectW = viewport.width
+                aspectH = viewport.height
+            }
+        }
+
+        if (capture.width == viewport.width && capture.height == viewport.height) {
+            texCoordBuffer = duplicateTexCoords(FULL_RECTANGLE_TEX_COORDS)
+            return
+        }
+
+        if (aspectW == capture.width && aspectH == capture.height) {
+            texCoordBuffer = duplicateTexCoords(FULL_RECTANGLE_TEX_COORDS)
+            return
+        }
+
+        val coords = centerCropRect(
+            capture.width, capture.height,
+            aspectW, aspectH
+        )
+        texCoordBuffer = duplicateTexCoords(coords)
     }
 
     /**
@@ -121,7 +217,7 @@ class FullFrameRect(var program: Texture2DProgram) {
         program.draw(
             mvpMatrix, FULL_RECTANGLE_BUF, 0,
             4, 2, 2 * Float.SIZE_BYTES,
-            texMatrix, FULL_RECTANGLE_TEX_BUF, textureId, 2 * Float.SIZE_BYTES
+            texMatrix, texCoordBuffer, textureId, 2 * Float.SIZE_BYTES
         )
     }
 }
