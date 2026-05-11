@@ -28,6 +28,7 @@ import io.github.thibaultbee.streampack.data.VideoConfig
 import io.github.thibaultbee.streampack.internal.gl.EglWindowSurface
 import io.github.thibaultbee.streampack.internal.gl.FullFrameRect
 import io.github.thibaultbee.streampack.internal.gl.Texture2DProgram
+import io.github.thibaultbee.streampack.logger.Logger
 import io.github.thibaultbee.streampack.internal.orientation.ISourceOrientationListener
 import io.github.thibaultbee.streampack.internal.orientation.ISourceOrientationProvider
 import io.github.thibaultbee.streampack.internal.utils.av.video.DynamicRangeProfile
@@ -127,6 +128,9 @@ class VideoMediaCodecEncoder(
         private val orientationProvider: ISourceOrientationProvider?
     ) :
         SurfaceTexture.OnFrameAvailableListener, ISourceOrientationListener {
+        companion object {
+            private const val TAG = "CodecSurface"
+        }
         private var eglSurface: EglWindowSurface? = null
         private var fullFrameRect: FullFrameRect? = null
         private var textureId = -1
@@ -140,10 +144,6 @@ class VideoMediaCodecEncoder(
         private var isRunning = false
         private var surfaceTexture: SurfaceTexture? = null
         private val stMatrix = FloatArray(16)
-        
-        // Power optimization: batch frame processing to reduce wake-ups - strict 24fps cap
-        private var lastFrameTimeMs = 0L
-        private val minFrameIntervalMs = 41L // ~24fps max to match video encoding settings
 
         private var _inputSurface: Surface? = null
         val inputSurface: Surface?
@@ -200,6 +200,14 @@ class VideoMediaCodecEncoder(
                     setDefaultBufferSize(defaultBufferSize.width, defaultBufferSize.height)
                     setOnFrameAvailableListener(this@CodecSurface)
                 }
+
+                // Center-crop to handle aspect ratio mismatch (e.g. 4:3 camera → 16:9 encoder)
+                val sourceAspect = defaultBufferSize.width.toFloat() / defaultBufferSize.height.toFloat()
+                val targetAspect = size.width.toFloat() / size.height.toFloat()
+                fullFrameRect?.setCropForAspectRatio(sourceAspect, targetAspect)
+                Logger.d(TAG, "Aspect ratio crop: source=${defaultBufferSize.width}x${defaultBufferSize.height} " +
+                    "(${String.format("%.3f", sourceAspect)}), target=${size.width}x${size.height} " +
+                    "(${String.format("%.3f", targetAspect)})")
             }
         }
 
@@ -257,17 +265,6 @@ class VideoMediaCodecEncoder(
         override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
             if (!isRunning) {
                 return
-            }
-            
-            // Aggressive frame throttling strictly capped at 24fps
-            val currentTimeMs = System.currentTimeMillis()
-            // Only throttle if we're already processing frames (not on startup)
-            if (surfaceTexture != null && !surfaceTexture!!.timestamp.equals(0L)) {
-                if (currentTimeMs - lastFrameTimeMs < minFrameIntervalMs) {
-                    // Skip frames to strictly maintain 24fps - saving significant CPU
-                    return
-                }
-                lastFrameTimeMs = currentTimeMs
             }
 
             executor.execute {

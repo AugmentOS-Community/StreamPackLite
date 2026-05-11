@@ -32,6 +32,9 @@ import java.nio.FloatBuffer
  */
 class FullFrameRect(var program: Texture2DProgram) {
     private val mvpMatrix = FloatArray(16)
+    private val cropMatrix = FloatArray(16)
+    private val tempMatrix = FloatArray(16)
+    private var hasCrop = false
 
     companion object {
         /**
@@ -103,6 +106,47 @@ class FullFrameRect(var program: Texture2DProgram) {
         return program.createTextureObject()
     }
 
+    /**
+     * Sets up a crop matrix to center-crop the source aspect ratio into the target
+     * aspect ratio. Applied after the SurfaceTexture transform so both compose correctly.
+     * Fills the output completely with no black bars.
+     *
+     * For example, 4:3 source → 16:9 target crops the top and bottom of the frame.
+     *
+     * @param sourceAspect width/height of the camera source
+     * @param targetAspect width/height of the encoder output
+     */
+    fun setCropForAspectRatio(sourceAspect: Float, targetAspect: Float) {
+        if (sourceAspect <= 0f || targetAspect <= 0f) {
+            hasCrop = false
+            return
+        }
+
+        val ratio = sourceAspect / targetAspect
+        val scaleX: Float
+        val scaleY: Float
+
+        if (ratio > 1.001f) {
+            // Source is wider than target — zoom into center horizontally
+            scaleX = 1f / ratio
+            scaleY = 1f
+        } else if (ratio < 0.999f) {
+            // Source is taller than target — zoom into center vertically
+            scaleX = 1f
+            scaleY = ratio
+        } else {
+            hasCrop = false
+            return
+        }
+
+        // Build a matrix that scales around the center (0.5, 0.5) in texture space:
+        // translate to origin, scale, translate back
+        Matrix.setIdentityM(cropMatrix, 0)
+        Matrix.translateM(cropMatrix, 0, (1f - scaleX) / 2f, (1f - scaleY) / 2f, 0f)
+        Matrix.scaleM(cropMatrix, 0, scaleX, scaleY, 1f)
+        hasCrop = true
+    }
+
     fun setMVPMatrixAndViewPort(rotation: Float, resolution: Size, mirroredVertically: Boolean) {
         Matrix.setIdentityM(mvpMatrix, 0)
         Matrix.scaleM(mvpMatrix, 0, if (mirroredVertically) -1f else 1f, 1f, 0f)
@@ -117,11 +161,18 @@ class FullFrameRect(var program: Texture2DProgram) {
      * Draws a viewport-filling rect, texturing it with the specified texture object.
      */
     fun drawFrame(textureId: Int, texMatrix: FloatArray) {
-        // Use the identity matrix for MVP so our 2x2 FULL_RECTANGLE covers the viewport.
+        // Compose crop matrix with SurfaceTexture transform: crop * texMatrix
+        // This applies the SurfaceTexture transform first, then crops the result
+        val finalTexMatrix = if (hasCrop) {
+            Matrix.multiplyMM(tempMatrix, 0, cropMatrix, 0, texMatrix, 0)
+            tempMatrix
+        } else {
+            texMatrix
+        }
         program.draw(
             mvpMatrix, FULL_RECTANGLE_BUF, 0,
             4, 2, 2 * Float.SIZE_BYTES,
-            texMatrix, FULL_RECTANGLE_TEX_BUF, textureId, 2 * Float.SIZE_BYTES
+            finalTexMatrix, FULL_RECTANGLE_TEX_BUF, textureId, 2 * Float.SIZE_BYTES
         )
     }
 }

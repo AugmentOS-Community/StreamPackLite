@@ -23,10 +23,12 @@ import io.github.thibaultbee.streampack.logger.Logger
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import video.api.rtmpdroid.Rtmp
 
 class RtmpProducer(
-    private val coroutineDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val coroutineDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val connectTimeoutMs: Long = 15_000L
 ) : ILiveEndpoint {
     override var onConnectionListener: OnConnectionListener? = null
 
@@ -55,7 +57,9 @@ class RtmpProducer(
         withContext(coroutineDispatcher) {
             try {
                 isOnError = false
-                socket.connect("$url live=1 flashver=FMLE/3.0\\20(compatible;\\20FMSc/1.0)")
+                withTimeout(connectTimeoutMs) {
+                    socket.connect("$url live=1 flashver=FMLE/3.0\\20(compatible;\\20FMSc/1.0)")
+                }
                 _isConnected = true
                 onConnectionListener?.onSuccess()
             } catch (e: Exception) {

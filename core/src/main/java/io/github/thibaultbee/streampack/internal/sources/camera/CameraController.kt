@@ -54,38 +54,27 @@ class CameraController(
     }
 
     private fun getClosestFpsRange(cameraId: String, fps: Int): Range<Int> {
-        var fpsRangeList = context.getCameraFpsList(cameraId)
-        Logger.i(TAG, "Supported FPS range list: $fpsRangeList")
+        val fpsRangeList = context.getCameraFpsList(cameraId)
+        Logger.i(TAG, "Supported FPS range list: $fpsRangeList, requested fps: $fps")
 
-        // Power optimization - try to use a low FPS range to save power
-        // First try to find a fixed range at a low FPS (15fps)
-        val targetLowFps = 15
-        val lowFpsFixedRange = fpsRangeList.find { it.lower == it.upper && it.lower == targetLowFps }
-        
-        if (lowFpsFixedRange != null) {
-            Logger.d(TAG, "Found low fixed fps range: $lowFpsFixedRange")
-            return lowFpsFixedRange
+        // Get ranges that contain the requested FPS
+        // Samsung S4 workaround: fps range is [4000-30000] instead of [4-30]
+        var matchingRanges = fpsRangeList.filter { it.contains(fps) || it.contains(fps * 1000) }
+
+        if (matchingRanges.isEmpty()) {
+            Logger.w(TAG, "No FPS range contains $fps, falling back to closest available")
+            // Fall back: pick the range whose upper bound is closest to requested fps
+            val fallback = fpsRangeList.minByOrNull { Math.abs(it.upper - fps) }
+            if (fallback != null) {
+                Logger.d(TAG, "Fallback FPS range: $fallback")
+                return fallback
+            }
+            throw InvalidParameterException("No FPS ranges available for camera $cameraId")
         }
-        
-        // Try to find a range that includes our target fps
-        fpsRangeList = fpsRangeList.filter { it.contains(fps) }
-        if (fpsRangeList.isEmpty()) {
-            // If no range contains our target fps, use the original list
-            fpsRangeList = context.getCameraFpsList(cameraId)
-        }
-        
-        // Look for a range with a lower bound not higher than our target fps
-        val suitableRanges = fpsRangeList.filter { it.lower <= fps }
-        if (suitableRanges.isNotEmpty()) {
-            // Get the range with lower bound closest to our target fps
-            val selectedRange = suitableRanges.minWith(compareBy { fps - it.lower })
-            Logger.d(TAG, "Using range with lower bound close to target fps: $selectedRange")
-            return selectedRange
-        }
-        
-        // Fallback - just get the first range
-        val selectedFpsRange = fpsRangeList[0]
-        Logger.d(TAG, "Fallback fps range: $selectedFpsRange")
+
+        // Prefer the narrowest range (fixed ranges like [30,30] are best for stable framerate)
+        val selectedFpsRange = matchingRanges.minByOrNull { it.upper - it.lower }!!
+        Logger.d(TAG, "Selected FPS range: $selectedFpsRange for requested $fps fps")
         return selectedFpsRange
     }
 
@@ -205,8 +194,8 @@ class CameraController(
             throw RuntimeException("No target surface")
         }
 
-        // Use PREVIEW template for most camera types
-        val captureBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+        // Use RECORD template to ensure stable framerate from the camera HAL
+        val captureBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         
         try {
             // Add all surfaces
