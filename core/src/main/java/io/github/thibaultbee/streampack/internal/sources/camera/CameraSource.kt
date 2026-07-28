@@ -70,6 +70,10 @@ class CameraSource(
     private var cameraController = CameraController(context)
     val settings = CameraSettings(context, cameraController)
 
+    /** Measured camera capture fps from Camera2 CaptureCallback. */
+    val measuredCaptureFps: Double
+        get() = cameraController.measuredCaptureFps
+
     override val timestampOffset = CameraHelper.getTimeOffsetToMonoClock(context, cameraId)
     override val hasSurface = true
     override val hasFrames = false

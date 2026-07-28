@@ -102,6 +102,7 @@ class VideoMediaCodecEncoder(
     override fun extendMediaFormat(config: Config, format: MediaFormat) {
         val videoConfig = config as VideoConfig
         codecSurface?.captureResolution = videoConfig.captureResolution
+        codecSurface?.setTargetFps(videoConfig.fps)
         orientationProvider?.let {
             it.getOrientedSize(videoConfig.resolution).apply {
                 // Override previous format
@@ -124,6 +125,16 @@ class VideoMediaCodecEncoder(
     val inputSurface: Surface?
         get() = codecSurface?.inputSurface
 
+    /**
+     * Measured encode fps from MediaCodec output when available; otherwise surface throttle rate.
+     */
+    val measuredFps: Double
+        get() {
+            val encodeFps = measuredOutputFps
+            if (encodeFps.isFinite() && encodeFps > 0) return encodeFps
+            return codecSurface?.measuredFps ?: Double.NaN
+        }
+
     class CodecSurface(
         private val orientationProvider: ISourceOrientationProvider?
     ) :
@@ -142,9 +153,34 @@ class VideoMediaCodecEncoder(
         private var surfaceTexture: SurfaceTexture? = null
         private val stMatrix = FloatArray(16)
         
-        // Power optimization: batch frame processing to reduce wake-ups - strict 24fps cap
+        // Drop camera frames so encode rate matches VideoConfig.fps (not a hard 24fps cap).
         private var lastFrameTimeMs = 0L
-        private val minFrameIntervalMs = 41L // ~24fps max to match video encoding settings
+        @Volatile
+        private var minFrameIntervalMs = 66L // default ~15fps until setTargetFps()
+        private var acceptedFrameCount = 0
+        private var measuredWindowStartMs = 0L
+        @Volatile
+        var measuredFps: Double = Double.NaN
+            private set
+
+        fun setTargetFps(fps: Int) {
+            val clamped = fps.coerceAtLeast(1)
+            minFrameIntervalMs = (1000L / clamped).coerceAtLeast(1L)
+        }
+
+        private fun recordAcceptedFrame(nowMs: Long) {
+            if (measuredWindowStartMs == 0L) {
+                measuredWindowStartMs = nowMs
+                acceptedFrameCount = 0
+            }
+            acceptedFrameCount++
+            val elapsedMs = nowMs - measuredWindowStartMs
+            if (elapsedMs >= 1000L) {
+                measuredFps = acceptedFrameCount * 1000.0 / elapsedMs
+                acceptedFrameCount = 0
+                measuredWindowStartMs = nowMs
+            }
+        }
 
         private var _inputSurface: Surface? = null
         val inputSurface: Surface?
@@ -274,15 +310,15 @@ class VideoMediaCodecEncoder(
                 return
             }
             
-            // Aggressive frame throttling strictly capped at 24fps
+            // Throttle to VideoConfig.fps (e.g. 5fps => 200ms interval)
             val currentTimeMs = System.currentTimeMillis()
             // Only throttle if we're already processing frames (not on startup)
             if (surfaceTexture != null && !surfaceTexture!!.timestamp.equals(0L)) {
                 if (currentTimeMs - lastFrameTimeMs < minFrameIntervalMs) {
-                    // Skip frames to strictly maintain 24fps - saving significant CPU
                     return
                 }
                 lastFrameTimeMs = currentTimeMs
+                recordAcceptedFrame(currentTimeMs)
             }
 
             executor.execute {
@@ -307,6 +343,10 @@ class VideoMediaCodecEncoder(
             ensureGlContext(eglSurface) {
                 surfaceTexture?.updateTexImage()
             }
+            lastFrameTimeMs = 0L
+            acceptedFrameCount = 0
+            measuredWindowStartMs = 0L
+            measuredFps = Double.NaN
             isRunning = true
         }
 

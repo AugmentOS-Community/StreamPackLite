@@ -44,6 +44,11 @@ class CameraController(
     val cameraId: String?
         get() = camera?.id
 
+    /** Rolling camera capture fps from CaptureCallback (NaN until first 1s window). */
+    @Volatile
+    var measuredCaptureFps: Double = Double.NaN
+        private set
+
     private var captureSession: CameraCaptureSession? = null
     private var captureRequest: CaptureRequest.Builder? = null
 
@@ -54,37 +59,28 @@ class CameraController(
     }
 
     private fun getClosestFpsRange(cameraId: String, fps: Int): Range<Int> {
-        var fpsRangeList = context.getCameraFpsList(cameraId)
-        Logger.i(TAG, "Supported FPS range list: $fpsRangeList")
+        val fpsRangeList = context.getCameraFpsList(cameraId)
+        Logger.i(TAG, "Supported FPS range list: $fpsRangeList (requested=$fps)")
 
-        // Power optimization - try to use a low FPS range to save power
-        // First try to find a fixed range at a low FPS (15fps)
-        val targetLowFps = 15
-        val lowFpsFixedRange = fpsRangeList.find { it.lower == it.upper && it.lower == targetLowFps }
-        
-        if (lowFpsFixedRange != null) {
-            Logger.d(TAG, "Found low fixed fps range: $lowFpsFixedRange")
-            return lowFpsFixedRange
+        // Prefer an advertised fixed range at the exact target.
+        fpsRangeList.find { it.lower == fps && it.upper == fps }?.let {
+            Logger.d(TAG, "Using exact fixed fps range: $it")
+            return it
         }
-        
-        // Try to find a range that includes our target fps
-        fpsRangeList = fpsRangeList.filter { it.contains(fps) }
-        if (fpsRangeList.isEmpty()) {
-            // If no range contains our target fps, use the original list
-            fpsRangeList = context.getCameraFpsList(cameraId)
+
+        // Mentra Live / K900: fixed targets inside a wider band (e.g. [5,30]) are honored.
+        // Force [fps,fps] so AE does not run the sensor at the top of the band.
+        if (fpsRangeList.any { it.contains(fps) }) {
+            val fixed = Range(fps, fps)
+            Logger.d(TAG, "Using forced fixed fps range inside supported band: $fixed")
+            return fixed
         }
-        
-        // Look for a range with a lower bound not higher than our target fps
-        val suitableRanges = fpsRangeList.filter { it.lower <= fps }
-        if (suitableRanges.isNotEmpty()) {
-            // Get the range with lower bound closest to our target fps
-            val selectedRange = suitableRanges.minWith(compareBy { fps - it.lower })
-            Logger.d(TAG, "Using range with lower bound close to target fps: $selectedRange")
-            return selectedRange
-        }
-        
-        // Fallback - just get the first range
-        val selectedFpsRange = fpsRangeList[0]
+
+        // Fallback: closest advertised range by lower/upper distance to target.
+        val selectedFpsRange = fpsRangeList.minWith(
+            compareBy<Range<Int>> { kotlin.math.abs(it.lower - fps) }
+                .thenBy { kotlin.math.abs(it.upper - fps) }
+        )
         Logger.d(TAG, "Fallback fps range: $selectedFpsRange")
         return selectedFpsRange
     }
@@ -135,11 +131,14 @@ class CameraController(
         ) {
             super.onCaptureCompleted(session, request, result)
             
-            // Log frame rate every second to monitor performance
+            // Measure + log camera capture fps every second
             frameCount++
             val currentTime = System.currentTimeMillis()
-            if (currentTime - lastLogTime >= 1000) {
-                Logger.d(TAG, "Camera capture framerate: $frameCount fps")
+            val elapsedMs = currentTime - lastLogTime
+            if (elapsedMs >= 1000) {
+                val fps = frameCount * 1000.0 / elapsedMs
+                measuredCaptureFps = fps
+                Logger.i(TAG, "Camera capture framerate (measured): ${"%.1f".format(fps)} fps")
                 frameCount = 0
                 lastLogTime = currentTime
             }

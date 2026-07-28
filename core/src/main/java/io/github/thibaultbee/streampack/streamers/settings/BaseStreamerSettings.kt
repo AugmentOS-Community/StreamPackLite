@@ -53,6 +53,18 @@ class BaseStreamerVideoSettings(private val videoEncoder: VideoMediaCodecEncoder
         set(value) {
             videoEncoder?.let { it.bitrate = value }
         }
+
+    /**
+     * Measured encode fps from MediaCodec output (NaN until a 1s sample window completes).
+     */
+    val measuredFps: Double
+        get() = videoEncoder?.measuredFps ?: Double.NaN
+
+    /**
+     * Measured encode bitrate from MediaCodec output bytes (-1 until a 1s sample window completes).
+     */
+    val measuredBitrateBps: Long
+        get() = videoEncoder?.measuredBitrateBps ?: -1L
 }
 
 class BaseStreamerAudioSettings(
