@@ -153,10 +153,13 @@ class VideoMediaCodecEncoder(
         private var surfaceTexture: SurfaceTexture? = null
         private val stMatrix = FloatArray(16)
         
-        // Drop camera frames so encode rate matches VideoConfig.fps (not a hard 24fps cap).
-        private var lastFrameTimeMs = 0L
+        // Pace encode to VideoConfig.fps with a next-deadline schedule (not
+        // min-interval-since-last-accept). Min-interval phase-locks against a
+        // higher camera cadence when the target is not a divisor — e.g. 30fps
+        // capture targeting 20fps locks to every other frame (~15fps).
+        private var nextFrameDueMs = 0L
         @Volatile
-        private var minFrameIntervalMs = 66L // default ~15fps until setTargetFps()
+        private var targetFrameIntervalMs = 66L // default ~15fps until setTargetFps()
         private var acceptedFrameCount = 0
         private var measuredWindowStartMs = 0L
         @Volatile
@@ -165,7 +168,31 @@ class VideoMediaCodecEncoder(
 
         fun setTargetFps(fps: Int) {
             val clamped = fps.coerceAtLeast(1)
-            minFrameIntervalMs = (1000L / clamped).coerceAtLeast(1L)
+            targetFrameIntervalMs = (1000L / clamped).coerceAtLeast(1L)
+            nextFrameDueMs = 0L
+        }
+
+        /**
+         * Returns true when this camera frame should be encoded. Advances the
+         * deadline by one target interval on accept so average rate matches
+         * [targetFrameIntervalMs] even when capture fps is not a multiple of
+         * the encode fps (30→20 yields ~20, not ~15).
+         */
+        private fun shouldAcceptFrame(nowMs: Long): Boolean {
+            if (nextFrameDueMs == 0L) {
+                nextFrameDueMs = nowMs + targetFrameIntervalMs
+                return true
+            }
+            if (nowMs < nextFrameDueMs) {
+                return false
+            }
+            nextFrameDueMs += targetFrameIntervalMs
+            // If we fell more than one interval behind, resync so we don't
+            // accept a burst of queued frames back-to-back.
+            if (nextFrameDueMs <= nowMs) {
+                nextFrameDueMs = nowMs + targetFrameIntervalMs
+            }
+            return true
         }
 
         private fun recordAcceptedFrame(nowMs: Long) {
@@ -179,6 +206,19 @@ class VideoMediaCodecEncoder(
                 measuredFps = acceptedFrameCount * 1000.0 / elapsedMs
                 acceptedFrameCount = 0
                 measuredWindowStartMs = nowMs
+            }
+        }
+
+        /** Consume a dropped camera frame so SurfaceTexture buffers don't stall. */
+        private fun drainDroppedFrame(surfaceTexture: SurfaceTexture) {
+            executor.execute {
+                synchronized(this) {
+                    eglSurface?.let {
+                        it.makeCurrent()
+                        surfaceTexture.updateTexImage()
+                        surfaceTexture.releaseTexImage()
+                    }
+                }
             }
         }
 
@@ -309,15 +349,14 @@ class VideoMediaCodecEncoder(
             if (!isRunning) {
                 return
             }
-            
-            // Throttle to VideoConfig.fps (e.g. 5fps => 200ms interval)
+
+            // Pace to VideoConfig.fps once the camera has produced a real frame.
             val currentTimeMs = System.currentTimeMillis()
-            // Only throttle if we're already processing frames (not on startup)
-            if (surfaceTexture != null && !surfaceTexture!!.timestamp.equals(0L)) {
-                if (currentTimeMs - lastFrameTimeMs < minFrameIntervalMs) {
+            if (surfaceTexture.timestamp != 0L) {
+                if (!shouldAcceptFrame(currentTimeMs)) {
+                    drainDroppedFrame(surfaceTexture)
                     return
                 }
-                lastFrameTimeMs = currentTimeMs
                 recordAcceptedFrame(currentTimeMs)
             }
 
@@ -343,7 +382,7 @@ class VideoMediaCodecEncoder(
             ensureGlContext(eglSurface) {
                 surfaceTexture?.updateTexImage()
             }
-            lastFrameTimeMs = 0L
+            nextFrameDueMs = 0L
             acceptedFrameCount = 0
             measuredWindowStartMs = 0L
             measuredFps = Double.NaN
