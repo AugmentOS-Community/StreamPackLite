@@ -68,12 +68,26 @@ class CameraController(
             return it
         }
 
-        // Mentra Live / K900: fixed targets inside a wider band (e.g. [5,30]) are honored.
-        // Force [fps,fps] so AE does not run the sensor at the top of the band.
-        if (fpsRangeList.any { it.contains(fps) }) {
-            val fixed = Range(fps, fps)
-            Logger.d(TAG, "Using forced fixed fps range inside supported band: $fixed")
-            return fixed
+        val containing = fpsRangeList.filter { it.contains(fps) }
+        if (containing.isNotEmpty()) {
+            // Mentra Live / K900 only: invent [fps,fps] so AE does not ride the top of a
+            // wider band (e.g. [5,30]). Standards-compliant HALs may reject synthetic
+            // fixed ranges, so this stays opt-in via forceFixedFpsInsideSupportedBand.
+            if (forceFixedFpsInsideSupportedBand) {
+                val fixed = Range(fps, fps)
+                Logger.d(TAG, "Using forced fixed fps range inside supported band: $fixed")
+                return fixed
+            }
+
+            // Otherwise stay on an advertised range that actually contains the target —
+            // prefer the narrowest span, then the upper bound closest to the request.
+            val selected = containing.minWith(
+                compareBy<Range<Int>> { it.upper - it.lower }
+                    .thenBy { kotlin.math.abs(it.upper - fps) }
+                    .thenBy { kotlin.math.abs(it.lower - fps) }
+            )
+            Logger.d(TAG, "Using advertised containing fps range: $selected")
+            return selected
         }
 
         // Fallback: closest advertised range by lower/upper distance to target.
@@ -122,18 +136,34 @@ class CameraController(
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         private var frameCount = 0
-        private var lastLogTime = System.currentTimeMillis()
-        
+        private var lastLogTime = 0L
+        private var samplingActive = false
+
+        fun resetMetrics() {
+            frameCount = 0
+            lastLogTime = 0L
+            samplingActive = false
+            measuredCaptureFps = Double.NaN
+        }
+
         override fun onCaptureCompleted(
             session: CameraCaptureSession,
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
             super.onCaptureCompleted(session, request, result)
-            
-            // Measure + log camera capture fps every second
-            frameCount++
+
             val currentTime = System.currentTimeMillis()
+            // Start the sampling window on the first completed capture so idle time
+            // before the session (or between sessions) cannot poison the first FPS.
+            if (!samplingActive) {
+                samplingActive = true
+                frameCount = 0
+                lastLogTime = currentTime
+                return
+            }
+
+            frameCount++
             val elapsedMs = currentTime - lastLogTime
             if (elapsedMs >= 1000) {
                 val fps = frameCount * 1000.0 / elapsedMs
@@ -143,17 +173,17 @@ class CameraController(
                 lastLogTime = currentTime
             }
         }
-        
+
         override fun onCaptureFailed(
             session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure
         ) {
             super.onCaptureFailed(session, request, failure)
             Logger.e(TAG, "Capture failed with code ${failure.reason}")
         }
-        
+
         override fun onCaptureSequenceCompleted(
-            session: CameraCaptureSession, 
-            sequenceId: Int, 
+            session: CameraCaptureSession,
+            sequenceId: Int,
             frameNumber: Long
         ) {
             super.onCaptureSequenceCompleted(session, sequenceId, frameNumber)
@@ -256,6 +286,7 @@ class CameraController(
         require(captureSession != null) { "Capture session must not be null" }
         require(targets.isNotEmpty()) { " At least one target is required" }
 
+        captureCallback.resetMetrics()
         captureRequest = createRequestSession(
             camera!!, captureSession!!, getClosestFpsRange(camera!!.id, fps), targets
         )
@@ -289,6 +320,8 @@ class CameraController(
 
         camera?.close()
         camera = null
+
+        captureCallback.resetMetrics()
     }
 
     fun addTargets(targets: List<Surface>) {
@@ -415,5 +448,14 @@ class CameraController(
          */
         @JvmField
         var enablePixsmartEisOnRequest: Boolean = false
+
+        /**
+         * Opt-in Mentra Live / K900 hook: when true, [getClosestFpsRange] may request a
+         * synthetic fixed `[fps,fps]` range that is only covered by a wider advertised
+         * band (e.g. requesting 10 fps when the HAL lists `[5,30]`). Mentra Live honors
+         * that; standards-compliant HALs may reject it — keep false for generic devices.
+         */
+        @JvmField
+        var forceFixedFpsInsideSupportedBand: Boolean = false
     }
 }
