@@ -38,4 +38,8 @@ class BaseCameraStreamerSettings(
      */
     override val camera: CameraSettings
         get() = cameraSource.settings
+
+    /** Measured Camera2 capture fps (NaN until first 1s sample). */
+    val measuredCaptureFps: Double
+        get() = cameraSource.measuredCaptureFps
 }

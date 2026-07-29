@@ -48,6 +48,48 @@ abstract class MediaCodecEncoder<T : Config>(
     open val bitrate: Int
         get() = _bitrate
 
+    /** Rolling measured encode bitrate from MediaCodec output (bps). -1 until first 1s window. */
+    @Volatile
+    var measuredBitrateBps: Long = -1L
+        protected set
+
+    /** Rolling measured encode fps from MediaCodec output frames. NaN until first 1s window. */
+    @Volatile
+    var measuredOutputFps: Double = Double.NaN
+        protected set
+
+    private var metricsWindowBytes = 0L
+    private var metricsWindowFrames = 0
+    private var metricsWindowStartMs = 0L
+
+    private fun resetOutputMetrics() {
+        metricsWindowBytes = 0L
+        metricsWindowFrames = 0
+        metricsWindowStartMs = 0L
+        measuredBitrateBps = -1L
+        measuredOutputFps = Double.NaN
+    }
+
+    private fun recordEncodedOutput(sizeBytes: Int) {
+        if (sizeBytes <= 0) return
+        val now = System.currentTimeMillis()
+        if (metricsWindowStartMs == 0L) {
+            metricsWindowStartMs = now
+            metricsWindowBytes = 0L
+            metricsWindowFrames = 0
+        }
+        metricsWindowBytes += sizeBytes.toLong()
+        metricsWindowFrames++
+        val elapsedMs = now - metricsWindowStartMs
+        if (elapsedMs >= 1000L) {
+            measuredBitrateBps = metricsWindowBytes * 8_000L / elapsedMs
+            measuredOutputFps = metricsWindowFrames * 1000.0 / elapsedMs
+            metricsWindowBytes = 0L
+            metricsWindowFrames = 0
+            metricsWindowStartMs = now
+        }
+    }
+
     private val encoderCallback = object : MediaCodec.Callback() {
         override fun onOutputBufferAvailable(
             codec: MediaCodec,
@@ -70,6 +112,7 @@ abstract class MediaCodecEncoder<T : Config>(
                          * Drops codec data. They are already passed in the extra buffer.
                          */
                         if (info.flags != MediaCodec.BUFFER_FLAG_CODEC_CONFIG) {
+                            recordEncodedOutput(info.size)
                             Frame(
                                 buffer,
                                 info.presentationTimeUs, // pts
@@ -226,6 +269,7 @@ abstract class MediaCodecEncoder<T : Config>(
         synchronized(lock) {
             isOnError = false
             isStopped = false
+            resetOutputMetrics()
             mediaCodec?.start() ?: throw IllegalStateException("Can't start without configuration")
         }
     }
