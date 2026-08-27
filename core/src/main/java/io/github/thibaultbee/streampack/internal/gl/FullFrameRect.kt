@@ -84,7 +84,7 @@ class FullFrameRect(var program: Texture2DProgram) {
         }
 
         /** Center-crop rectangle in pixel space (top-left origin) matching target aspect. */
-        private fun centerCropRect(
+        internal fun centerCropRect(
             captureWidth: Int,
             captureHeight: Int,
             targetWidth: Int,
@@ -119,6 +119,26 @@ class FullFrameRect(var program: Texture2DProgram) {
                 u0, v1,
                 u1, v1
             )
+        }
+
+        internal fun centerCropRectForRotation(
+            captureWidth: Int,
+            captureHeight: Int,
+            targetWidth: Int,
+            targetHeight: Int,
+            rotation: Int
+        ): FloatArray {
+            val normalizedRotation = ((rotation % 360) + 360) % 360
+            return if (normalizedRotation == 90 || normalizedRotation == 270) {
+                centerCropRect(
+                    captureHeight,
+                    captureWidth,
+                    targetHeight,
+                    targetWidth
+                )
+            } else {
+                centerCropRect(captureWidth, captureHeight, targetWidth, targetHeight)
+            }
         }
     }
 
@@ -161,8 +181,9 @@ class FullFrameRect(var program: Texture2DProgram) {
 
     /**
      * Sets MVP + viewport to [viewport] size, and texture coordinates to center-crop [capture]
-     * to match the aspect ratio of [viewport] after accounting for [rotation] (swap width/height
-     * for 90° / 270° when comparing aspects, matching how the MVP rotates the drawn quad).
+     * to match the aspect ratio of [viewport]. When the MVP rotates the frame by 90° / 270°, both
+     * capture and target geometry must be swapped so the crop is applied on the corresponding
+     * texture axis without changing its magnitude.
      */
     fun setMVPMatrixViewPortAndCrop(
         rotation: Float,
@@ -178,33 +199,15 @@ class FullFrameRect(var program: Texture2DProgram) {
         )
         GLES20.glViewport(0, 0, viewport.width, viewport.height)
 
-        val rotNorm = ((rotation.toInt() % 360) + 360) % 360
-        val aspectW: Int
-        val aspectH: Int
-        when (rotNorm) {
-            90, 270 -> {
-                aspectW = viewport.height
-                aspectH = viewport.width
-            }
-            else -> {
-                aspectW = viewport.width
-                aspectH = viewport.height
-            }
-        }
-
         if (capture.width == viewport.width && capture.height == viewport.height) {
             texCoordBuffer = duplicateTexCoords(FULL_RECTANGLE_TEX_COORDS)
             return
         }
 
-        if (aspectW == capture.width && aspectH == capture.height) {
-            texCoordBuffer = duplicateTexCoords(FULL_RECTANGLE_TEX_COORDS)
-            return
-        }
-
-        val coords = centerCropRect(
+        val coords = centerCropRectForRotation(
             capture.width, capture.height,
-            aspectW, aspectH
+            viewport.width, viewport.height,
+            rotation.toInt()
         )
         texCoordBuffer = duplicateTexCoords(coords)
     }
