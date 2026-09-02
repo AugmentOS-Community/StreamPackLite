@@ -293,20 +293,25 @@ class CameraController(
 
         if (enablePixsmartEisOnRequest) {
             applyPixsmartEis()
+        } else {
+            Logger.i(TAG, "EIS stage=streampack-request applied=false enablePixsmartEisOnRequest=false")
         }
     }
 
     private fun applyPixsmartEis() {
         val builder = captureRequest ?: return
+        // Scene mode is ignored unless CONTROL_MODE is USE_SCENE_MODE. The vendor
+        // key is registered as int[] (Pixsmart); a boxed Int is dropped by the HAL.
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_USE_SCENE_MODE)
         builder.set(
             CaptureRequest.CONTROL_SCENE_MODE,
             CaptureRequest.CONTROL_SCENE_MODE_SPORTS
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val pixsmartEisKey = CaptureRequest.Key(
-                "com.pixsmart.eisfeature.eisEnable", Int::class.java
+                "com.pixsmart.eisfeature.eisEnable", IntArray::class.java
             )
-            builder.set(pixsmartEisKey, 1)
+            builder.set(pixsmartEisKey, intArrayOf(1))
         }
         updateRepeatingSession()
         Logger.i(TAG, "Applied Pixsmart EIS (SPORTS + vendor key) to capture request")
