@@ -319,14 +319,15 @@ class CameraController(
 
     fun stopCamera() {
         captureRequest = null
-
-        captureSession?.close()
+        val sessionToClose = captureSession
+        val cameraToClose = camera
         captureSession = null
-
-        camera?.close()
         camera = null
-
-        captureCallback.resetMetrics()
+        val cleanup = io.github.thibaultbee.streampack.internal.utils.Cleanup()
+        cleanup.run { sessionToClose?.close() }
+        cleanup.run { cameraToClose?.close() }
+        cleanup.run { captureCallback.resetMetrics() }
+        cleanup.throwIfFailed()
     }
 
     fun addTargets(targets: List<Surface>) {
@@ -355,7 +356,10 @@ class CameraController(
     }
 
     fun release() {
-        threadManager.release()
+        val cleanup = io.github.thibaultbee.streampack.internal.utils.Cleanup()
+        cleanup.run { stopCamera() }
+        cleanup.run { threadManager.release() }
+        cleanup.throwIfFailed()
     }
 
 

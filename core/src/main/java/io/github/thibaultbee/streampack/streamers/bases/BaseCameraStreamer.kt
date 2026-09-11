@@ -26,6 +26,7 @@ import io.github.thibaultbee.streampack.internal.endpoints.IEndpoint
 import io.github.thibaultbee.streampack.internal.muxers.IMuxer
 import io.github.thibaultbee.streampack.internal.sources.AudioSource
 import io.github.thibaultbee.streampack.internal.sources.camera.CameraSource
+import io.github.thibaultbee.streampack.internal.utils.Cleanup
 import io.github.thibaultbee.streampack.listeners.OnErrorListener
 import io.github.thibaultbee.streampack.streamers.helpers.CameraStreamerConfigurationHelper
 import io.github.thibaultbee.streampack.streamers.interfaces.ICameraStreamer
@@ -116,17 +117,19 @@ open class BaseCameraStreamer(
      * @see [startPreview]
      */
     override fun stopPreview() {
-        runBlocking {
-            stopStream()
-        }
-        cameraSource.stopPreview()
+        val cleanup = Cleanup()
+        cleanup.run { runBlocking { stopStream() } }
+        cleanup.run { cameraSource.stopPreview() }
+        cleanup.throwIfFailed()
     }
 
     /**
      * Same as [BaseStreamer.release] but it also calls [stopPreview].
      */
     override fun release() {
-        stopPreview()
-        super.release()
+        val cleanup = Cleanup()
+        cleanup.run { stopPreview() }
+        cleanup.run { super.release() }
+        cleanup.throwIfFailed()
     }
 }

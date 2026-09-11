@@ -34,6 +34,7 @@ import io.github.thibaultbee.streampack.internal.muxers.IMuxerListener
 import io.github.thibaultbee.streampack.internal.orientation.ISourceOrientationProvider
 import io.github.thibaultbee.streampack.internal.sources.IAudioSource
 import io.github.thibaultbee.streampack.internal.sources.IVideoSource
+import io.github.thibaultbee.streampack.internal.utils.Cleanup
 import io.github.thibaultbee.streampack.listeners.OnErrorListener
 import io.github.thibaultbee.streampack.logger.Logger
 import io.github.thibaultbee.streampack.streamers.helpers.IConfigurationHelper
@@ -41,6 +42,8 @@ import io.github.thibaultbee.streampack.streamers.helpers.StreamerConfigurationH
 import io.github.thibaultbee.streampack.streamers.interfaces.IStreamer
 import io.github.thibaultbee.streampack.streamers.settings.BaseStreamerSettings
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
 
@@ -323,12 +326,15 @@ abstract class BaseStreamer(
             return
         }
 
-        stopStreamImpl()
+        try {
+            stopStreamImpl()
 
-        // Encoder does not return to CONFIGURED state... so we have to reset everything...
-        resetAudio()
-        resetVideo()
-        isStreaming = false
+            // Reconfigure only after a successful stop. Failed publishers must be released.
+            resetAudio()
+            resetVideo()
+        } finally {
+            isStreaming = false
+        }
     }
 
     /**
@@ -336,15 +342,16 @@ abstract class BaseStreamer(
      *
      * @see [stopStream]
      */
-    private suspend fun stopStreamImpl() {
-        videoSource?.stopStream()
-        videoEncoder?.stopStream()
-        audioEncoder?.stopStream()
-        audioSource?.stopStream()
-
-        muxer.stopStream()
-
-        endpoint.stopStream()
+    private suspend fun stopStreamImpl() = withContext(NonCancellable) {
+        // A dead camera HAL must not prevent microphone or network teardown.
+        val cleanup = Cleanup()
+        cleanup.run { videoSource?.stopStream() }
+        cleanup.run { videoEncoder?.stopStream() }
+        cleanup.run { audioEncoder?.stopStream() }
+        cleanup.run { audioSource?.stopStream() }
+        cleanup.run { muxer.stopStream() }
+        cleanup.runSuspending { endpoint.stopStream() }
+        cleanup.throwIfFailed()
     }
 
     /**
@@ -383,15 +390,16 @@ abstract class BaseStreamer(
      * @see [configure]
      */
     override fun release() {
-        audioEncoder?.release()
-        videoEncoder?.codecSurface?.release()
-        videoEncoder?.release()
-        audioSource?.release()
-        videoSource?.release()
-
-        muxer.release()
-
-        endpoint.release()
+        val cleanup = Cleanup()
+        cleanup.run { audioEncoder?.release() }
+        cleanup.run { videoEncoder?.codecSurface?.release() }
+        cleanup.run { videoEncoder?.release() }
+        cleanup.run { audioSource?.release() }
+        cleanup.run { videoSource?.release() }
+        cleanup.run { muxer.release() }
+        cleanup.run { endpoint.release() }
+        isStreaming = false
+        cleanup.throwIfFailed()
     }
 
     companion object {
