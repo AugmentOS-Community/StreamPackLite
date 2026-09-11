@@ -22,6 +22,7 @@ import io.github.thibaultbee.streampack.data.AudioConfig
 import io.github.thibaultbee.streampack.data.Config
 import io.github.thibaultbee.streampack.data.VideoConfig
 import io.github.thibaultbee.streampack.error.StreamPackError
+import io.github.thibaultbee.streampack.error.CameraError
 import io.github.thibaultbee.streampack.internal.data.Frame
 import io.github.thibaultbee.streampack.internal.data.Packet
 import io.github.thibaultbee.streampack.internal.encoders.AudioMediaCodecEncoder
@@ -44,6 +45,12 @@ import io.github.thibaultbee.streampack.streamers.settings.BaseStreamerSettings
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.nio.ByteBuffer
 
 
@@ -73,6 +80,20 @@ abstract class BaseStreamer(
     override val helper = StreamerConfigurationHelper(muxer.helper)
 
     private var isStreaming = false
+    private var isReleased = false
+    @Volatile private var lifecycleGeneration = 0L
+    @Volatile private var cameraGeneration = 0L
+    private val lifecycleMutex = Mutex()
+    private val errorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // All lifecycle operations share this boundary, including synchronous preview APIs.
+    protected suspend fun <T> withLifecycle(block: suspend () -> T): T =
+        withContext(Dispatchers.IO) { lifecycleMutex.withLock { block() } }
+
+    protected fun requireUsable() = check(!isReleased) { "Streamer was released; create a new instance" }
+
+    // Preview can outlive multiple stream sessions. Its failures have a separate lifetime.
+    protected fun invalidateCameraErrors() { ++cameraGeneration }
 
     private var audioStreamId: Int? = null
     private var videoStreamId: Int? = null
@@ -146,19 +167,26 @@ abstract class BaseStreamer(
 
     /**
      * Manages error on stream.
-     * Stops only stream.
+     * Enqueues teardown off callback threads; camera loss disposes the entire publisher.
      *
      * @param error triggered [StreamPackError]
      */
     private fun onStreamError(error: StreamPackError) {
-        try {
-            runBlocking {
-                stopStream()
+        val cameraFailure = error is CameraError
+        val generation = if (cameraFailure) cameraGeneration else lifecycleGeneration
+        errorScope.launch {
+            val handled = withLifecycle {
+                val currentGeneration = if (cameraFailure) cameraGeneration else lifecycleGeneration
+                if (isReleased || generation != currentGeneration) return@withLifecycle false
+                try {
+                    if (error is CameraError) dispose() else stopStreamOwned()
+                } catch (e: Exception) {
+                    Logger.e(TAG, "onStreamError: Can't stop stream", e)
+                }
+                true
             }
-        } catch (e: Exception) {
-            Logger.e(TAG, "onStreamError: Can't stop stream")
-        } finally {
-            onErrorListener?.onError(error)
+            // User code may synchronously call release; never call it under our mutex.
+            if (handled) onErrorListener?.onError(error)
         }
     }
 
@@ -201,7 +229,12 @@ abstract class BaseStreamer(
      * @throws [StreamPackError] if configuration can not be applied.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    override fun configure(audioConfig: AudioConfig) {
+    override fun configure(audioConfig: AudioConfig) = runBlocking {
+        withLifecycle { configureAudioOwned(audioConfig) }
+    }
+
+    private suspend fun configureAudioOwned(audioConfig: AudioConfig) {
+        requireUsable()
         require(hasAudio) { "Do not need to set audio as it is a video only streamer" }
 
         // Keep settings when we need to reconfigure
@@ -214,7 +247,7 @@ abstract class BaseStreamer(
 
             endpoint.configure((videoConfig?.startBitrate ?: 0) + audioConfig.startBitrate)
         } catch (e: Exception) {
-            release()
+            disposeAfterFailure(e)
             throw StreamPackError(e)
         }
     }
@@ -233,7 +266,12 @@ abstract class BaseStreamer(
      *
      * @throws [StreamPackError] if configuration can not be applied.
      */
-    override fun configure(videoConfig: VideoConfig) {
+    override fun configure(videoConfig: VideoConfig) = runBlocking {
+        withLifecycle { configureVideoOwned(videoConfig) }
+    }
+
+    private suspend fun configureVideoOwned(videoConfig: VideoConfig) {
+        requireUsable()
         require(hasVideo) { "Do not need to set video as it is a audio only streamer" }
 
         // Keep settings when we need to reconfigure
@@ -246,7 +284,7 @@ abstract class BaseStreamer(
 
             endpoint.configure(videoConfig.startBitrate + (audioConfig?.startBitrate ?: 0))
         } catch (e: Exception) {
-            release()
+            disposeAfterFailure(e)
             throw StreamPackError(e)
         }
     }
@@ -267,9 +305,11 @@ abstract class BaseStreamer(
      * @throws [StreamPackError] if configuration can not be applied.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    override fun configure(audioConfig: AudioConfig, videoConfig: VideoConfig) {
-        configure(audioConfig)
-        configure(videoConfig)
+    override fun configure(audioConfig: AudioConfig, videoConfig: VideoConfig) = runBlocking {
+        withLifecycle {
+            configureAudioOwned(audioConfig)
+            configureVideoOwned(videoConfig)
+        }
     }
 
     /**
@@ -280,7 +320,10 @@ abstract class BaseStreamer(
      *
      * @see [stopStream]
      */
-    override suspend fun startStream() {
+    override suspend fun startStream(): Unit = withLifecycle {
+        requireUsable()
+        check(!isStreaming) { "Stream is already running" }
+        ++lifecycleGeneration
         isStreaming = true
         try {
             endpoint.startStream()
@@ -306,8 +349,9 @@ abstract class BaseStreamer(
 
             videoSource?.startStream()
             videoEncoder?.startStream()
+            onStartStream()
         } catch (e: Exception) {
-            stopStream()
+            disposeAfterFailure(e)
             throw StreamPackError(e)
         }
     }
@@ -320,18 +364,26 @@ abstract class BaseStreamer(
      *
      * @see [startStream]
      */
-    override suspend fun stopStream() {
+    override suspend fun stopStream() = withLifecycle { stopStreamOwned() }
+
+    protected suspend fun stopStreamOwned() {
         if (!isStreaming) {
             Logger.w(TAG, "Stream is not running")
             return
         }
 
+        ++lifecycleGeneration
         try {
             stopStreamImpl()
 
             // Reconfigure only after a successful stop. Failed publishers must be released.
             resetAudio()
             resetVideo()
+        } catch (e: Exception) {
+            // An incompletely stopped/reconfigured publisher can never be reused.
+            isStreaming = false
+            disposeAfterFailure(e)
+            throw e
         } finally {
             isStreaming = false
         }
@@ -345,6 +397,7 @@ abstract class BaseStreamer(
     private suspend fun stopStreamImpl() = withContext(NonCancellable) {
         // A dead camera HAL must not prevent microphone or network teardown.
         val cleanup = Cleanup()
+        cleanup.run { onStopStream() }
         cleanup.run { videoSource?.stopStream() }
         cleanup.run { videoEncoder?.stopStream() }
         cleanup.run { audioEncoder?.stopStream() }
@@ -353,6 +406,12 @@ abstract class BaseStreamer(
         cleanup.runSuspending { endpoint.stopStream() }
         cleanup.throwIfFailed()
     }
+
+    /** Extension-owned work shares the same serialized start/stop boundary. */
+    protected open fun onStartStream() {}
+
+    /** Extension-owned stream work is stopped on normal and terminal teardown alike. */
+    protected open fun onStopStream() {}
 
     /**
      * Prepares audio encoder for another session.
@@ -389,8 +448,23 @@ abstract class BaseStreamer(
      *
      * @see [configure]
      */
-    override fun release() {
+    override fun release() = runBlocking { withLifecycle { dispose() } }
+
+    protected suspend fun disposeAfterFailure(error: Exception) {
+        try {
+            dispose()
+        } catch (cleanupError: Exception) {
+            if (cleanupError !== error) error.addSuppressed(cleanupError)
+        }
+    }
+
+    /** Non-recursive terminal cleanup, shared by release and every failed lifecycle operation. */
+    protected suspend fun dispose() = withContext(NonCancellable) {
+        if (isReleased) return@withContext
+        isReleased = true
+        ++lifecycleGeneration
         val cleanup = Cleanup()
+        if (isStreaming) cleanup.runSuspending { stopStreamImpl() }
         cleanup.run { audioEncoder?.release() }
         cleanup.run { videoEncoder?.codecSurface?.release() }
         cleanup.run { videoEncoder?.release() }

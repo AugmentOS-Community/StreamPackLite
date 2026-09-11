@@ -114,13 +114,15 @@ class CameraController(
     ) : CameraDevice.StateCallback() {
         private val failureReported = AtomicBoolean(false)
 
+        @OptIn(ExperimentalCoroutinesApi::class)
         override fun onOpened(device: CameraDevice) {
-            if (cont.isActive) cont.resume(device) else device.close()
+            // Covers cancellation after resume but before the caller receives ownership.
+            cont.resume(device) { device.close() }
         }
 
         override fun onDisconnected(camera: CameraDevice) {
             Logger.w(TAG, "Camera ${camera.id} has been disconnected")
-            fail(CameraError("Camera has been disconnected"))
+            fail(camera, CameraError("Camera has been disconnected"))
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
@@ -134,11 +136,12 @@ class CameraController(
                 ERROR_CAMERA_SERVICE -> CameraError("Camera service has crashed")
                 else -> CameraError("Unknown error")
             }
-            fail(exc)
+            fail(camera, exc)
         }
 
-        private fun fail(error: CameraError) {
+        private fun fail(camera: CameraDevice, error: CameraError) {
             if (!failureReported.compareAndSet(false, true)) return
+            try { camera.close() } catch (e: Exception) { error.addSuppressed(e) }
             if (cont.isActive) {
                 cont.resumeWithException(error)
             } else if (!cont.isCancelled) {
@@ -152,11 +155,16 @@ class CameraController(
     private class CameraCaptureSessionCallback(
         private val cont: CancellableContinuation<CameraCaptureSession>,
     ) : CameraCaptureSession.StateCallback() {
-        override fun onConfigured(session: CameraCaptureSession) = cont.resume(session)
+        @OptIn(ExperimentalCoroutinesApi::class)
+        override fun onConfigured(session: CameraCaptureSession) {
+            cont.resume(session) { session.close() }
+        }
 
         override fun onConfigureFailed(session: CameraCaptureSession) {
             Logger.e(TAG, "Camera Session configuration failed")
-            cont.resumeWithException(CameraError("Camera: failed to configure the capture session"))
+            val error = CameraError("Camera: failed to configure the capture session")
+            try { session.close() } catch (e: Exception) { error.addSuppressed(e) }
+            if (cont.isActive) cont.resumeWithException(error)
         }
     }
 
@@ -309,10 +317,15 @@ class CameraController(
 
         withContext(coroutineDispatcher) {
             val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            camera = openCamera(manager, cameraId).also { cameraDevice ->
+            try {
+                // Claim the device before the next suspension so a failed session cannot lose it.
+                camera = openCamera(manager, cameraId)
                 captureSession = createCaptureSession(
-                    cameraDevice, targets, dynamicRange
+                    camera!!, targets, dynamicRange
                 )
+            } catch (e: Exception) {
+                try { stopCamera() } catch (cleanupError: Exception) { e.addSuppressed(cleanupError) }
+                throw e
             }
         }
     }

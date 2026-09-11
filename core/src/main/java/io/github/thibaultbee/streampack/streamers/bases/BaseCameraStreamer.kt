@@ -80,7 +80,16 @@ open class BaseCameraStreamer(
          */
         @RequiresPermission(Manifest.permission.CAMERA)
         set(value) {
-            cameraSource.cameraId = value
+            runBlocking { withLifecycle {
+                requireUsable()
+                invalidateCameraErrors()
+                try {
+                    cameraSource.cameraId = value
+                } catch (e: Exception) {
+                    disposeAfterFailure(e)
+                    throw e
+                }
+            } }
         }
 
     override var settings =
@@ -100,15 +109,19 @@ open class BaseCameraStreamer(
      */
     @RequiresPermission(allOf = [Manifest.permission.CAMERA])
     override fun startPreview(previewSurface: Surface, cameraId: String) {
-        require(videoConfig != null) { "Video has not been configured!" }
         runBlocking {
-            try {
-                cameraSource.previewSurface = previewSurface
-                cameraSource.encoderSurface = videoEncoder?.inputSurface
-                cameraSource.startPreview(cameraId)
-            } catch (e: Exception) {
-                stopPreview()
-                throw StreamPackError(e)
+            withLifecycle {
+                requireUsable()
+                require(videoConfig != null) { "Video has not been configured!" }
+                invalidateCameraErrors()
+                try {
+                    cameraSource.previewSurface = previewSurface
+                    cameraSource.encoderSurface = videoEncoder?.inputSurface
+                    cameraSource.startPreview(cameraId)
+                } catch (e: Exception) {
+                    disposeAfterFailure(e)
+                    throw StreamPackError(e)
+                }
             }
         }
     }
@@ -119,20 +132,16 @@ open class BaseCameraStreamer(
      *
      * @see [startPreview]
      */
-    override fun stopPreview() {
+    override fun stopPreview() = runBlocking { withLifecycle {
+        invalidateCameraErrors()
         val cleanup = Cleanup()
-        cleanup.run { runBlocking { stopStream() } }
+        cleanup.runSuspending { stopStreamOwned() }
         cleanup.run { cameraSource.stopPreview() }
-        cleanup.throwIfFailed()
-    }
-
-    /**
-     * Same as [BaseStreamer.release] but it also calls [stopPreview].
-     */
-    override fun release() {
-        val cleanup = Cleanup()
-        cleanup.run { stopPreview() }
-        cleanup.run { super.release() }
-        cleanup.throwIfFailed()
-    }
+        try {
+            cleanup.throwIfFailed()
+        } catch (e: Exception) {
+            disposeAfterFailure(e)
+            throw e
+        }
+    } }
 }
