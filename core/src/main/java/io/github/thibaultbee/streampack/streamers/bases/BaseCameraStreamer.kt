@@ -82,9 +82,10 @@ open class BaseCameraStreamer(
         set(value) {
             runBlocking { withLifecycle {
                 requireUsable()
+                cameraSource.validateCameraId(value)
                 invalidateCameraErrors()
                 try {
-                    cameraSource.cameraId = value
+                    cameraSource.switchCamera(value)
                 } catch (e: Exception) {
                     disposeAfterFailure(e)
                     throw e

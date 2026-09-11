@@ -50,23 +50,31 @@ class CameraSource(
     // Set an extremely low-resolution preview size for maximum power saving
     var maxPreviewSize: Size = Size(160, 120) // Quarter QQVGA resolution
 
-    var cameraId: String = context.defaultCameraId
-        get() = cameraController.cameraId ?: field
+    private var selectedCameraId: String = context.defaultCameraId
+    var cameraId: String
+        get() = cameraController.cameraId ?: selectedCameraId
         @RequiresPermission(Manifest.permission.CAMERA)
         set(value) {
-            if (!context.isFrameRateSupported(value, fps)) {
-                throw UnsupportedOperationException("Camera $value does not support $fps fps")
-            }
-            runBlocking {
-                val restartStream = isStreaming
-                val restartPreview = isPreviewing
-                stopPreview()
-                field = value
-                if (restartPreview) {
-                    startPreview(value, restartStream)
-                }
-            }
+            validateCameraId(value)
+            runBlocking { switchCamera(value) }
         }
+
+    /** Reject unsupported requests before the owner invalidates or tears down a session. */
+    fun validateCameraId(value: String) {
+        if (!context.isFrameRateSupported(value, fps)) {
+            throw UnsupportedOperationException("Camera $value does not support $fps fps")
+        }
+    }
+
+    /** Apply a validated camera switch; the caller owns serialization and failure cleanup. */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    suspend fun switchCamera(value: String) {
+        val restartStream = isStreaming
+        val restartPreview = isPreviewing
+        stopPreview()
+        selectedCameraId = value
+        if (restartPreview) startPreview(value, restartStream)
+    }
     private var cameraController = CameraController(context)
     /** Routes camera-device loss to the stream owner even after opening has completed. */
     var onErrorListener: io.github.thibaultbee.streampack.listeners.OnErrorListener?
