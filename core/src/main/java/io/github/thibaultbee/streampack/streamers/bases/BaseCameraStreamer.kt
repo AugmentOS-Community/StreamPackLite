@@ -58,6 +58,9 @@ open class BaseCameraStreamer(
     initialOnErrorListener = initialOnErrorListener
 ), ICameraStreamer {
     private val cameraSource = videoSource as CameraSource
+    init {
+        cameraSource.onErrorListener = onInternalErrorListener
+    }
     override val helper = CameraStreamerConfigurationHelper(muxer.helper)
 
     /**

@@ -25,14 +25,18 @@ import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.params.OutputConfiguration
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Range
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import io.github.thibaultbee.streampack.error.CameraError
+import io.github.thibaultbee.streampack.listeners.OnErrorListener
 import io.github.thibaultbee.streampack.logger.Logger
 import io.github.thibaultbee.streampack.utils.getCameraFpsList
 import kotlinx.coroutines.*
 import java.security.InvalidParameterException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -40,6 +44,11 @@ class CameraController(
     private val context: Context,
     private val coroutineDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
+    /** Delivers active-camera failures on the main thread, scoped to the current camera open. */
+    var onErrorListener: OnErrorListener? = null
+    private val lifecycleLock = Any()
+    private var cameraGeneration = 0L
+    private val errorHandler = Handler(Looper.getMainLooper())
     private var camera: CameraDevice? = null
     val cameraId: String?
         get() = camera?.id
@@ -99,13 +108,19 @@ class CameraController(
         return selectedFpsRange
     }
 
-    private class CameraDeviceCallback(
+    internal class CameraDeviceCallback(
         private val cont: CancellableContinuation<CameraDevice>,
+        private val onActiveCameraFailure: (CameraError) -> Unit,
     ) : CameraDevice.StateCallback() {
-        override fun onOpened(device: CameraDevice) = cont.resume(device)
+        private val failureReported = AtomicBoolean(false)
+
+        override fun onOpened(device: CameraDevice) {
+            if (cont.isActive) cont.resume(device) else device.close()
+        }
 
         override fun onDisconnected(camera: CameraDevice) {
             Logger.w(TAG, "Camera ${camera.id} has been disconnected")
+            fail(CameraError("Camera has been disconnected"))
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
@@ -119,7 +134,18 @@ class CameraController(
                 ERROR_CAMERA_SERVICE -> CameraError("Camera service has crashed")
                 else -> CameraError("Unknown error")
             }
-            if (cont.isActive) cont.resumeWithException(exc)
+            fail(exc)
+        }
+
+        private fun fail(error: CameraError) {
+            if (!failureReported.compareAndSet(false, true)) return
+            if (cont.isActive) {
+                cont.resumeWithException(error)
+            } else if (!cont.isCancelled) {
+                // The open continuation is already complete during capture. A
+                // device loss must still reach the owner and stop microphone use.
+                onActiveCameraFailure(error)
+            }
         }
     }
 
@@ -195,8 +221,18 @@ class CameraController(
     private suspend fun openCamera(
         manager: CameraManager, cameraId: String
     ): CameraDevice = suspendCancellableCoroutine { cont ->
+        val generation = synchronized(lifecycleLock) { ++cameraGeneration }
         threadManager.openCamera(
-            manager, cameraId, CameraDeviceCallback(cont)
+            manager, cameraId, CameraDeviceCallback(cont) { error ->
+                // Never tear down from Camera2's callback thread: closing camera
+                // resources may need that same thread. Invalidate queued failures
+                // on close/reopen, and serialize the check with invalidation.
+                errorHandler.post {
+                    synchronized(lifecycleLock) {
+                        if (generation == cameraGeneration) onErrorListener?.onError(error)
+                    }
+                }
+            }
         )
     }
 
@@ -318,6 +354,7 @@ class CameraController(
     }
 
     fun stopCamera() {
+        synchronized(lifecycleLock) { ++cameraGeneration }
         captureRequest = null
         val sessionToClose = captureSession
         val cameraToClose = camera

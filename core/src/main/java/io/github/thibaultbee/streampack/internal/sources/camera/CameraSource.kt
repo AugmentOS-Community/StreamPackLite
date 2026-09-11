@@ -68,6 +68,10 @@ class CameraSource(
             }
         }
     private var cameraController = CameraController(context)
+    /** Routes camera-device loss to the stream owner even after opening has completed. */
+    var onErrorListener: io.github.thibaultbee.streampack.listeners.OnErrorListener?
+        get() = cameraController.onErrorListener
+        set(value) { cameraController.onErrorListener = value }
     val settings = CameraSettings(context, cameraController)
 
     /** Measured camera capture fps from Camera2 CaptureCallback. */
