@@ -26,6 +26,7 @@ import io.github.thibaultbee.streampack.internal.endpoints.IEndpoint
 import io.github.thibaultbee.streampack.internal.muxers.IMuxer
 import io.github.thibaultbee.streampack.internal.sources.AudioSource
 import io.github.thibaultbee.streampack.internal.sources.camera.CameraSource
+import io.github.thibaultbee.streampack.internal.utils.Cleanup
 import io.github.thibaultbee.streampack.listeners.OnErrorListener
 import io.github.thibaultbee.streampack.streamers.helpers.CameraStreamerConfigurationHelper
 import io.github.thibaultbee.streampack.streamers.interfaces.ICameraStreamer
@@ -57,6 +58,9 @@ open class BaseCameraStreamer(
     initialOnErrorListener = initialOnErrorListener
 ), ICameraStreamer {
     private val cameraSource = videoSource as CameraSource
+    init {
+        cameraSource.onErrorListener = onInternalErrorListener
+    }
     override val helper = CameraStreamerConfigurationHelper(muxer.helper)
 
     /**
@@ -76,7 +80,17 @@ open class BaseCameraStreamer(
          */
         @RequiresPermission(Manifest.permission.CAMERA)
         set(value) {
-            cameraSource.cameraId = value
+            runBlocking { withLifecycle {
+                requireUsable()
+                cameraSource.validateCameraId(value)
+                invalidateCameraErrors()
+                try {
+                    cameraSource.switchCamera(value)
+                } catch (e: Exception) {
+                    disposeAfterFailure(e)
+                    throw e
+                }
+            } }
         }
 
     override var settings =
@@ -96,15 +110,19 @@ open class BaseCameraStreamer(
      */
     @RequiresPermission(allOf = [Manifest.permission.CAMERA])
     override fun startPreview(previewSurface: Surface, cameraId: String) {
-        require(videoConfig != null) { "Video has not been configured!" }
         runBlocking {
-            try {
-                cameraSource.previewSurface = previewSurface
-                cameraSource.encoderSurface = videoEncoder?.inputSurface
-                cameraSource.startPreview(cameraId)
-            } catch (e: Exception) {
-                stopPreview()
-                throw StreamPackError(e)
+            withLifecycle {
+                requireUsable()
+                require(videoConfig != null) { "Video has not been configured!" }
+                invalidateCameraErrors()
+                try {
+                    cameraSource.previewSurface = previewSurface
+                    cameraSource.encoderSurface = videoEncoder?.inputSurface
+                    cameraSource.startPreview(cameraId)
+                } catch (e: Exception) {
+                    disposeAfterFailure(e)
+                    throw StreamPackError(e)
+                }
             }
         }
     }
@@ -115,18 +133,16 @@ open class BaseCameraStreamer(
      *
      * @see [startPreview]
      */
-    override fun stopPreview() {
-        runBlocking {
-            stopStream()
+    override fun stopPreview() = runBlocking { withLifecycle {
+        invalidateCameraErrors()
+        val cleanup = Cleanup()
+        cleanup.runSuspending { stopStreamOwned() }
+        cleanup.run { cameraSource.stopPreview() }
+        try {
+            cleanup.throwIfFailed()
+        } catch (e: Exception) {
+            disposeAfterFailure(e)
+            throw e
         }
-        cameraSource.stopPreview()
-    }
-
-    /**
-     * Same as [BaseStreamer.release] but it also calls [stopPreview].
-     */
-    override fun release() {
-        stopPreview()
-        super.release()
-    }
+    } }
 }

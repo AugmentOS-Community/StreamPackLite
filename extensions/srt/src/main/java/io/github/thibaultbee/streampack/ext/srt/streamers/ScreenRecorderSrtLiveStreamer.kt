@@ -172,18 +172,7 @@ class ScreenRecorderSrtLiveStreamer(
     /**
      * Same as [BaseScreenRecorderLiveStreamer.startStream] but also starts bitrate regulator.
      */
-    override suspend fun startStream() {
-        super.startStream()
-        if (bitrateRegulator != null) {
-            scheduler.start()
-        }
-    }
-
-    /**
-     * Same as [BaseScreenRecorderLiveStreamer.startStream] but also starts bitrate regulator.
-     */
-    override suspend fun startStream(url: String) {
-        super.startStream(url)
+    override fun onStartStream() {
         if (bitrateRegulator != null) {
             scheduler.start()
         }
@@ -223,8 +212,7 @@ class ScreenRecorderSrtLiveStreamer(
     /**
      * Same as [BaseScreenRecorderLiveStreamer.stopStream] but also stops bitrate regulator.
      */
-    override suspend fun stopStream() {
+    override fun onStopStream() {
         scheduler.cancel()
-        super.stopStream()
     }
 }
